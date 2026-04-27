@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monster Hunter X/Gen Reclaim Content</title>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        background: #1e1e1e;
+        color: white;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        margin: 0;
+    }
+
+    .container {
+        background: #2b2b2b;
+        padding: 30px;
+        border-radius: 12px;
+        width: 500px;
+        box-shadow: 0 0 15px rgba(0,0,0,0.4);
+    }
+
+    h1 {
+        text-align: center;
+        margin-bottom: 25px;
+    }
+
+    label {
+        display: block;
+        margin-top: 15px;
+        margin-bottom: 6px;
+        font-weight: bold;
+    }
+
+    select,
+    input[type="file"],
+    button {
+        width: 100%;
+        padding: 10px;
+        border-radius: 6px;
+        border: none;
+        box-sizing: border-box;
+        font-size: 14px;
+    }
+
+    select,
+    input[type="file"] {
+        background: #3a3a3a;
+        color: white;
+    }
+
+    button {
+        margin-top: 25px;
+        background: #4CAF50;
+        color: white;
+        font-weight: bold;
+        cursor: pointer;
+        transition: 0.2s;
+    }
+
+    button:hover {
+        background: #45a049;
+    }
+
+    .info {
+        margin-top: 20px;
+        font-size: 13px;
+        color: #cccccc;
+        line-height: 1.5;
+    }
+</style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Monster Hunter X/Gen Reclaim Content</h1>
+
+    <div class="info">
+        Game type is detected automatically based on save size.<br>
+        MHGen ≈ 3.81 MB<br>
+        MHX ≈ 3.53 MB
+    </div>
+
+    <label for="slot">Select Save Slot</label>
+    <select id="slot">
+        <option value="1">Slot 1</option>
+        <option value="2">Slot 2</option>
+        <option value="3">Slot 3</option>
+    </select>
+
+    <label for="fileInput">Select system Save File</label>
+    <input type="file" id="fileInput">
+
+    <button onclick="patchSave()">Apply Patch</button>
+
+    <div class="info">
+        This tool replaces the specified bytes with 00 without changing the file size.<br><br>
+        A patched copy of the save file will automatically download.
+    </div>
+</div>
+
+<script>
+const PATCHES = {
+    mhgen: {
+        sizeThreshold: 3.6 * 1024 * 1024,
+        slots: {
+            1: {
+                patchOffsets: [0x10F6FA, 0x10F6FB],
+                idStart: 0x1AD342
+            },
+            2: {
+                patchOffsets: [0x1FB1D2, 0x1FB1D3],
+                idStart: 0x298E1A
+            },
+            3: {
+                patchOffsets: [0x2E6CAA, 0x2E6CAB],
+                idStart: 0x3848F2
+            }
+        }
+    },
+    mhx: {
+        sizeThreshold: 0,
+        slots: {
+            1: {
+                patchOffsets: [0x0C96FA, 0x0C96FB],
+                idStart: 0x167342
+            },
+            2: {
+                patchOffsets: [0x1B4C26, 0x1B4C27],
+                idStart: 0x25286E
+            },
+            3: {
+                patchOffsets: [0x2A0152, 0x2A0153],
+                idStart: 0x33DD9A
+            }
+        }
+    }
+};
+
+function detectGame(fileSize) {
+    if (fileSize > 3.6 * 1024 * 1024) {
+        return 'mhgen';
+    }
+
+    return 'mhx';
+}
+
+function getHunterId(data, startOffset) {
+    let result = '';
+
+    for (let i = 0; i < 8; i++) {
+        const value = data[startOffset + i]
+            .toString(16)
+            .padStart(2, '0')
+            .toUpperCase();
+
+        result += value;
+    }
+
+    return result;
+}
+
+async function patchSave() {
+    const fileInput = document.getElementById('fileInput');
+    const slot = document.getElementById('slot').value;
+
+    if (!fileInput.files.length) {
+        alert('Please select a save file.');
+        return;
+    }
+
+    const file = fileInput.files[0];
+
+    const game = detectGame(file.size);
+
+    const arrayBuffer = await file.arrayBuffer();
+    const data = new Uint8Array(arrayBuffer);
+
+    const slotInfo = PATCHES[game].slots[slot];
+
+    const hunterId = getHunterId(data, slotInfo.idStart);
+
+    const storageKey = `${game}_slot${slot}_${hunterId}`;
+
+    if (localStorage.getItem(storageKey)) {
+        alert('Only 1 claim available per save');
+        return;
+    }
+
+    for (const offset of slotInfo.patchOffsets) {
+        if (offset >= data.length) {
+            alert(`Offset out of bounds: 0x${offset.toString(16).toUpperCase()}`);
+            return;
+        }
+
+        data[offset] = 0x00;
+    }
+
+    localStorage.setItem(storageKey, 'claimed');
+
+    // Download backup of original file
+    const backupBlob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
+    const backupUrl = URL.createObjectURL(backupBlob);
+
+    const backupLink = document.createElement('a');
+    backupLink.href = backupUrl;
+    backupLink.download = 'system_backup';
+
+    document.body.appendChild(backupLink);
+    backupLink.click();
+    document.body.removeChild(backupLink);
+
+    URL.revokeObjectURL(backupUrl);
+
+    // Download patched file with original name
+    const patchedBlob = new Blob([data], { type: 'application/octet-stream' });
+    const patchedUrl = URL.createObjectURL(patchedBlob);
+
+    const patchedLink = document.createElement('a');
+    patchedLink.href = patchedUrl;
+    patchedLink.download = 'system';
+
+    document.body.appendChild(patchedLink);
+    patchedLink.click();
+    document.body.removeChild(patchedLink);
+
+    URL.revokeObjectURL(patchedUrl);
+
+    alert(
+        `Patch applied successfully!
+
+` +
+        `Detected Game: ${game.toUpperCase()}
+` +
+        `Slot: ${slot}
+` +
+        `Hunter ID: ${hunterId}`
+    );
+}
+</script>
+
+</body>
+</html>
