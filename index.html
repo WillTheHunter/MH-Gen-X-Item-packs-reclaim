@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Monster Hunter X/Gen Reclaim Content</title>
+<title>Monster Hunter X/Gen Reclaim Item Packs</title>
 <style>
     body {
         font-family: Arial, sans-serif;
@@ -92,7 +92,8 @@
     <div class="info">
         Game type is detected automatically based on save size.<br>
         MHGen ≈ 3.81 MB<br>
-        MHX ≈ 3.53 MB
+        MHX ≈ 3.53 MB<br>
+		DO NOT USE THIS TOOL IF SWITCHING REGIONS LIKE EU TO USA (or backwards), TW TO JP (or backwards). YOU WILL LOSE YOUR CHARACTER'S ONLY CHANCE TO CLAIM DIFFERENT ITEM PACKS FROM OTHER REGIONS!
     </div>
 
     <label for="slot">Select Save Slot to Patch</label>
@@ -110,7 +111,8 @@
     <div id="patchStatus" class="status-badge" style="display: none;"></div>
 
     <div class="info">
-        This tool replaces specific bytes with 0x00 to reclaim item packs.<br><br>
+        This tool replaces specific bytes with 0x00 to reclaim item packs.<br>
+		The reason of it's existence is to help people get item packs again when porting their saves from generations to cross, or backwards.<br><br>
         <strong>New tracking system:</strong><br>
         - If tracking byte doesn't exist, the save file will be modified.<br>
         - Each slot can be claimed only once across all tool uses.<br>
