@@ -72,6 +72,16 @@
         color: #cccccc;
         line-height: 1.5;
     }
+    
+    .status-badge {
+        background: #3a3a3a;
+        border-left: 4px solid #4CAF50;
+        padding: 8px 12px;
+        margin-top: 15px;
+        font-size: 13px;
+        font-family: monospace;
+        word-break: break-all;
+    }
 </style>
 </head>
 <body>
@@ -85,7 +95,7 @@
         MHX ≈ 3.53 MB
     </div>
 
-    <label for="slot">Select Save Slot</label>
+    <label for="slot">Select Save Slot to Patch</label>
     <select id="slot">
         <option value="1">Slot 1</option>
         <option value="2">Slot 2</option>
@@ -97,150 +107,416 @@
 
     <button onclick="patchSave()">Apply Patch</button>
 
+    <div id="patchStatus" class="status-badge" style="display: none;"></div>
+
     <div class="info">
-        This tool replaces the specified bytes with 00 without changing the file size.<br><br>
-        A patched copy of the save file will automatically download.
+        This tool replaces specific bytes with 0x00 to reclaim item packs.<br><br>
+        <strong>New tracking system:</strong><br>
+        - If tracking byte doesn't exist, the save file will be modified.<br>
+        - Each slot can be claimed only once across all tool uses.<br>
+        A patched copy of the save file will automatically download (original save given also saved as "system_backup").
     </div>
 </div>
 
 <script>
+// ============================================================
+// Game-specific constants
+// ============================================================
 const PATCHES = {
     mhgen: {
-        sizeThreshold: 3.6 * 1024 * 1024,
+        sizeThreshold: 3.6 * 1024 * 1024,  // 3.81 MB typically
+        // Main patch offsets for each slot (where to zero out)
         slots: {
-            1: {
-                patchOffsets: [0x10F6FA, 0x10F6FB],
-                idStart: 0x1AD342
-            },
-            2: {
-                patchOffsets: [0x1FB1D2, 0x1FB1D3],
-                idStart: 0x298E1A
-            },
-            3: {
-                patchOffsets: [0x2E6CAA, 0x2E6CAB],
-                idStart: 0x3848F2
-            }
-        }
+            1: { patchOffsets: [0x10F6FA, 0x10F6FB] },
+            2: { patchOffsets: [0x1FB1D2, 0x1FB1D3] },
+            3: { patchOffsets: [0x2E6CAA, 0x2E6CAB] }
+        },
+        // Storage byte for claimed slots mask (absolute offset)
+        // For MHGen we use 0x3D0C2F (3D:0C2F)
+        claimedMaskOffset: 0x3D0C2F
     },
     mhx: {
-        sizeThreshold: 0,
+        sizeThreshold: 0,   // anything below 3.6 MB is considered MHX
         slots: {
-            1: {
-                patchOffsets: [0x0C96FA, 0x0C96FB],
-                idStart: 0x167342
-            },
-            2: {
-                patchOffsets: [0x1B4C26, 0x1B4C27],
-                idStart: 0x25286E
-            },
-            3: {
-                patchOffsets: [0x2A0152, 0x2A0153],
-                idStart: 0x33DD9A
-            }
-        }
+            1: { patchOffsets: [0x0C96FA, 0x0C96FB] },
+            2: { patchOffsets: [0x1B4C26, 0x1B4C27] },
+            3: { patchOffsets: [0x2A0152, 0x2A0153] }
+        },
+        // Storage byte for claimed slots mask (absolute offset)
+        // For MHX we use 0x389B2B (38:9B2B)
+        claimedMaskOffset: 0x389B2B
     }
 };
 
+// ------------------------------------------------------------
+// Mapping: which mask value corresponds to which slots?
+// According to the table provided:
+// 0 = nothing claimed
+// 1 = slot1 only
+// 2 = slot2 only
+// 3 = slot3 only
+// 4 = slot1 + slot2
+// 5 = slot2 + slot3
+// 6 = slot1 + slot3
+// 7 = slot1 + slot2 + slot3
+// ------------------------------------------------------------
+function isSlotClaimed(mask, slotNumber) {
+    const slotInclusion = {
+        1: [1],
+        2: [2],
+        3: [3],
+        4: [1,2],
+        5: [2,3],
+        6: [1,3],
+        7: [1,2,3]
+    };
+    
+    if (mask === 0) return false;
+    const includedSlots = slotInclusion[mask];
+    if (!includedSlots) return false;
+    return includedSlots.includes(slotNumber);
+}
+
+// Given current mask and a slot to claim, compute the new mask
+function computeNewMask(currentMask, slotToClaim) {
+    const slotInclusion = {
+        1: [1],
+        2: [2],
+        3: [3],
+        4: [1,2],
+        5: [2,3],
+        6: [1,3],
+        7: [1,2,3]
+    };
+    
+    let claimedSlots = [];
+    if (currentMask !== 0 && slotInclusion[currentMask]) {
+        claimedSlots = [...slotInclusion[currentMask]];
+    }
+    
+    if (!claimedSlots.includes(slotToClaim)) {
+        claimedSlots.push(slotToClaim);
+    }
+    claimedSlots.sort((a,b) => a-b);
+    
+    if (claimedSlots.length === 0) return 0;
+    if (claimedSlots.length === 1) {
+        if (claimedSlots[0] === 1) return 1;
+        if (claimedSlots[0] === 2) return 2;
+        if (claimedSlots[0] === 3) return 3;
+    } else if (claimedSlots.length === 2) {
+        if (claimedSlots[0] === 1 && claimedSlots[1] === 2) return 4;
+        if (claimedSlots[0] === 2 && claimedSlots[1] === 3) return 5;
+        if (claimedSlots[0] === 1 && claimedSlots[1] === 3) return 6;
+    } else if (claimedSlots.length === 3) {
+        if (claimedSlots[0] === 1 && claimedSlots[1] === 2 && claimedSlots[2] === 3) return 7;
+    }
+    return currentMask;
+}
+
+// ------------------------------------------------------------
+// Detect game version based on file size
+// ------------------------------------------------------------
 function detectGame(fileSize) {
     if (fileSize > 3.6 * 1024 * 1024) {
         return 'mhgen';
     }
-
     return 'mhx';
 }
 
-function getHunterId(data, startOffset) {
-    let result = '';
-
-    for (let i = 0; i < 8; i++) {
-        const value = data[startOffset + i]
-            .toString(16)
-            .padStart(2, '0')
-            .toUpperCase();
-
-        result += value;
+// ------------------------------------------------------------
+// NEW FUNCTION: Ensure the tracking byte exists.
+// If the tracking offset is beyond current file length, we extend
+// the data array by 1 byte (append 0x00) and adjust to the new size.
+// Returns an object: { extendedData, wasExtended }
+// ------------------------------------------------------------
+function ensureTrackingByteExists(data, gameType) {
+    const targetOffset = PATCHES[gameType].claimedMaskOffset;
+    let newData = new Uint8Array(data);
+    let wasExtended = false;
+    
+    // If the save file is shorter than the required offset, we need to extend it
+    if (targetOffset >= newData.length) {
+        // Calculate how many bytes we need to add to reach targetOffset (inclusive)
+        // We want the byte at exactly targetOffset to exist.
+        // So new length must be at least targetOffset + 1
+        const newLength = targetOffset + 1;
+        const extendedBuffer = new Uint8Array(newLength);
+        // Copy existing data to the beginning
+        extendedBuffer.set(newData, 0);
+        // Any bytes between old length and new length are already zero (by default)
+        // Set the tracking byte explicitly to 0 (original state)
+        extendedBuffer[targetOffset] = 0x00;
+        newData = extendedBuffer;
+        wasExtended = true;
     }
-
-    return result;
+    
+    return { extendedData: newData, wasExtended };
 }
 
+// ------------------------------------------------------------
+// Read current mask from the save file at game-specific offset
+// Now the offset is guaranteed to exist because we extended if needed.
+// ------------------------------------------------------------
+function getCurrentClaimedMask(data, gameType) {
+    const offset = PATCHES[gameType].claimedMaskOffset;
+    if (offset >= data.length) {
+        // This should not happen if ensureTrackingByteExists was called
+        return 0;
+    }
+    return data[offset];
+}
+
+// ------------------------------------------------------------
+// Write new mask value to the save file at tracking offset
+// ------------------------------------------------------------
+function setClaimedMask(data, gameType, newMask) {
+    const offset = PATCHES[gameType].claimedMaskOffset;
+    if (offset >= data.length) {
+        throw new Error(`Tracking offset 0x${offset.toString(16)} is out of bounds after extension. This should not happen.`);
+    }
+    data[offset] = newMask & 0xFF;
+}
+
+// ------------------------------------------------------------
+// Apply the actual slot patch: zero out the two bytes per slot
+// ------------------------------------------------------------
+function applySlotPatch(data, gameType, slotNumber) {
+    const slotInfo = PATCHES[gameType].slots[slotNumber];
+    if (!slotInfo) {
+        throw new Error(`Invalid slot ${slotNumber}`);
+    }
+    
+    for (const offset of slotInfo.patchOffsets) {
+        if (offset >= data.length) {
+            throw new Error(`Patch offset 0x${offset.toString(16)} out of bounds`);
+        }
+        data[offset] = 0x00;
+    }
+}
+
+// ------------------------------------------------------------
+// MAIN PATCH FUNCTION with byte extension logic
+// ------------------------------------------------------------
 async function patchSave() {
     const fileInput = document.getElementById('fileInput');
-    const slot = document.getElementById('slot').value;
-
+    const slotSelect = document.getElementById('slot');
+    const slotNumber = parseInt(slotSelect.value, 10);
+    const statusDiv = document.getElementById('patchStatus');
+    
+    statusDiv.style.display = 'none';
+    statusDiv.innerHTML = '';
+    
     if (!fileInput.files.length) {
         alert('Please select a save file.');
         return;
     }
-
+    
     const file = fileInput.files[0];
-
-    const game = detectGame(file.size);
-
-    const arrayBuffer = await file.arrayBuffer();
-    const data = new Uint8Array(arrayBuffer);
-
-    const slotInfo = PATCHES[game].slots[slot];
-
-    const hunterId = getHunterId(data, slotInfo.idStart);
-
-    const storageKey = `${game}_slot${slot}_${hunterId}`;
-
-    if (localStorage.getItem(storageKey)) {
-        alert('Only 1 claim available per save');
+    const gameType = detectGame(file.size);
+    const gameDisplayName = gameType === 'mhgen' ? 'MHGen' : 'MHX';
+    
+    let arrayBuffer;
+    try {
+        arrayBuffer = await file.arrayBuffer();
+    } catch (err) {
+        alert(`Failed to read file: ${err.message}`);
         return;
     }
-
-    for (const offset of slotInfo.patchOffsets) {
-        if (offset >= data.length) {
-            alert(`Offset out of bounds: 0x${offset.toString(16).toUpperCase()}`);
-            return;
-        }
-
-        data[offset] = 0x00;
+    
+    let data = new Uint8Array(arrayBuffer);
+    const trackingOffset = PATCHES[gameType].claimedMaskOffset;
+    
+    // STEP 1: Ensure tracking byte exists (extend file if necessary)
+    const { extendedData, wasExtended } = ensureTrackingByteExists(data, gameType);
+    data = extendedData;
+    
+    // STEP 2: Get current claimed mask (now guaranteed to exist)
+    let currentMask = getCurrentClaimedMask(data, gameType);
+    
+    // Validate mask range (should be 0-7, if not, treat as 0)
+    if (currentMask < 0 || currentMask > 7) {
+        console.warn(`Unexpected mask value ${currentMask}, resetting to 0`);
+        currentMask = 0;
+        // Immediately write the corrected mask to the tracking byte
+        setClaimedMask(data, gameType, 0);
     }
-
-    localStorage.setItem(storageKey, 'claimed');
-
-    // Download backup of original file
-    const backupBlob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
-    const backupUrl = URL.createObjectURL(backupBlob);
-
+    
+    // STEP 3: Check if selected slot is already claimed
+    const alreadyClaimed = isSlotClaimed(currentMask, slotNumber);
+    
+    if (alreadyClaimed) {
+        alert(`Cannot patch Slot ${slotNumber} again. Each save slot can be claimed only once! (Mask value indicates Slot ${slotNumber} already claimed.)`);
+        statusDiv.style.display = 'block';
+        statusDiv.style.backgroundColor = '#5a2a2a';
+        statusDiv.style.borderLeftColor = '#f44336';
+        statusDiv.innerHTML = `⚠️ Slot ${slotNumber} already claimed.`;
+        return;
+    }
+    
+    // STEP 4: Compute new mask after adding this slot
+    const newMask = computeNewMask(currentMask, slotNumber);
+    
+    if (newMask === currentMask) {
+        alert(`Slot ${slotNumber} claim would not change mask. Possibly already claimed. Aborting.`);
+        return;
+    }
+    
+    // STEP 5: Apply the actual slot patch (zero out the two bytes)
+    try {
+        applySlotPatch(data, gameType, slotNumber);
+    } catch (err) {
+        alert(`Failed to apply slot patch: ${err.message}`);
+        return;
+    }
+    
+    // STEP 6: Update the tracking mask byte
+    setClaimedMask(data, gameType, newMask);
+    
+    // ========================
+    // Backup original file (using the original arrayBuffer, before any modifications)
+    // ========================
+    const originalBlob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
+    const backupUrl = URL.createObjectURL(originalBlob);
     const backupLink = document.createElement('a');
     backupLink.href = backupUrl;
     backupLink.download = 'system_backup';
-
     document.body.appendChild(backupLink);
     backupLink.click();
     document.body.removeChild(backupLink);
-
     URL.revokeObjectURL(backupUrl);
-
-    // Download patched file with original name
+    
+    // ========================
+    // Download patched file (possibly extended)
+    // ========================
     const patchedBlob = new Blob([data], { type: 'application/octet-stream' });
     const patchedUrl = URL.createObjectURL(patchedBlob);
-
     const patchedLink = document.createElement('a');
     patchedLink.href = patchedUrl;
     patchedLink.download = 'system';
-
     document.body.appendChild(patchedLink);
     patchedLink.click();
     document.body.removeChild(patchedLink);
-
     URL.revokeObjectURL(patchedUrl);
-
-    alert(
-        `Patch applied successfully!
-
-` +
-        `Detected Game: ${game.toUpperCase()}
-` +
-        `Slot: ${slot}
-` +
-        `Hunter ID: ${hunterId}`
-    );
+    
+    // ========================
+    // Success feedback
+    // ========================
+    const mappingText = (maskVal) => {
+        switch(maskVal) {
+            case 0: return 'None claimed';
+            case 1: return 'Slot 1 only';
+            case 2: return 'Slot 2 only';
+            case 3: return 'Slot 3 only';
+            case 4: return 'Slot 1+2';
+            case 5: return 'Slot 2+3';
+            case 6: return 'Slot 1+3';
+            case 7: return 'All three slots';
+            default: return 'Unknown';
+        }
+    };
+    
+    let extensionMsg = '';
+    if (wasExtended) {
+        extensionMsg = `<br><span style="color: #ffcc00;">📎 Note: Save file was modified by 1 byte.</span>`;
+    }
+    
+    statusDiv.style.display = 'block';
+    statusDiv.style.backgroundColor = '#2a5a2a';
+    statusDiv.style.borderLeftColor = '#4CAF50';
+    statusDiv.innerHTML = `✅ Patch successful!<br>
+        Game: ${gameDisplayName}<br>
+        Slot claimed: ${slotNumber}<br>
+        Previous mask: ${currentMask} (${mappingText(currentMask)})<br>
+        New mask: (${mappingText(newMask)})<br>
+        Original backup and patched file downloaded.`;
+    
+    alert(`Slot ${slotNumber} successfully patched!\n\nTracking mask updated.\nEach slot can only be claimed once.${wasExtended ? '\n(Save file was extended by 1 byte to store tracking data)' : ''}`);
 }
+
+// ------------------------------------------------------------
+// Preview function: shows current claim status
+// Also extends file temporarily for preview to show correct status
+// ------------------------------------------------------------
+async function previewClaimStatus(file) {
+    const statusDiv = document.getElementById('patchStatus');
+    if (!file) return;
+    
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        let data = new Uint8Array(arrayBuffer);
+        const gameType = detectGame(file.size);
+        const trackingOffset = PATCHES[gameType].claimedMaskOffset;
+        
+        // For preview, we simulate extension to see if tracking byte would exist
+        let wasExtendedForPreview = false;
+        if (trackingOffset >= data.length) {
+            // Simulate extension for preview purposes
+            const newLength = trackingOffset + 1;
+            const extendedData = new Uint8Array(newLength);
+            extendedData.set(data, 0);
+            extendedData[trackingOffset] = 0x00;
+            data = extendedData;
+            wasExtendedForPreview = true;
+        }
+        
+        let currentMask = data[trackingOffset];
+        if (currentMask < 0 || currentMask > 7) currentMask = 0;
+        
+        const maskDescription = (mask) => {
+            switch(mask) {
+                case 0: return 'No slots claimed yet (original save)';
+                case 1: return 'Slot 1 claimed';
+                case 2: return 'Slot 2 claimed';
+                case 3: return 'Slot 3 claimed';
+                case 4: return 'Slots 1+2 claimed';
+                case 5: return 'Slots 2+3 claimed';
+                case 6: return 'Slots 1+3 claimed';
+                case 7: return 'All three slots claimed';
+                default: return `Unknown mask ${mask}`;
+            }
+        };
+        
+        const slotStatus = [];
+        for (let s=1; s<=3; s++) {
+            const claimed = isSlotClaimed(currentMask, s);
+            slotStatus.push(`Slot ${s}: ${claimed ? '✔️ claimed' : '◻️ available'}`);
+        }
+        
+        let previewExtensionNote = '';
+        if (wasExtendedForPreview) {
+            previewExtensionNote = `<br><span style="color: #ffaa00;">ℹ️ Tracking byte does not exist yet. It will be added when you apply the first patch.</span>`;
+        }
+        
+        statusDiv.style.display = 'block';
+        statusDiv.style.backgroundColor = '#2b2b2b';
+        statusDiv.style.borderLeftColor = '#4CAF50';
+        statusDiv.innerHTML = `<strong>📊 Save file claim status</strong><br>
+        Game: ${gameType.toUpperCase()}<br>
+        Tracking mask: ${currentMask} → ${maskDescription(currentMask)}<br>
+        ${slotStatus.join(' | ')}${previewExtensionNote}<br>
+        <span style="font-size:12px;">Select slot and click Apply Patch to claim.</span>`;
+        
+    } catch (err) {
+        console.warn("Preview error", err);
+        statusDiv.style.display = 'none';
+    }
+}
+
+// Attach file input change event to preview claim status
+document.addEventListener('DOMContentLoaded', () => {
+    const fileInput = document.getElementById('fileInput');
+    fileInput.addEventListener('change', async (event) => {
+        const file = event.target.files[0];
+        if (file) {
+            await previewClaimStatus(file);
+        } else {
+            document.getElementById('patchStatus').style.display = 'none';
+        }
+    });
+    
+    console.log("Tool ready: will extend save file by 1 byte if tracking offset doesn't exist. MHX tracking at 0x389B2B, MHGen at 0x3D0C2F");
+});
 </script>
 
 </body>
